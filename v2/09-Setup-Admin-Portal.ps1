@@ -112,9 +112,8 @@ try {
     $needsLogin = (-not $account) -or ($account.tenantId -ne $tenantId)
 
     if ($needsLogin) {
-        Write-Warn "Login required for tenant $tenantId"
-        Write-Host "       (Using device code — check the URL and code printed below)" -ForegroundColor Gray
-        az login --tenant $tenantId --use-device-code
+        Write-Warn "Login required — a browser window will open for you to sign in."
+        az login --tenant $tenantId --allow-no-subscriptions 2>$null | Out-Null
         $account = az account show 2>$null | ConvertFrom-Json
         if (-not $account) { throw "az login failed or was cancelled." }
     }
