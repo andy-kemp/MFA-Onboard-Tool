@@ -136,9 +136,16 @@ try {
     $tableBaseUrl = "https://$storageAccountName.table.core.windows.net"
 
     function Get-TableAuthHeaders {
-        param([string]$Method, [string]$Resource, [string]$ContentType = "application/json")
+        # Uses SharedKeyLite — StringToSign = Date + "\n" + CanonicalizedResource
+        # CanonicalizedResource = /account/resource_path (without query string)
+        param([string]$Resource, [string]$ContentType = "application/json")
         $date = (Get-Date).ToUniversalTime().ToString("R")
-        $stringToSign = "$Method`n`n$ContentType`n$date`n/$storageAccountName/$Resource"
+
+        # Strip any query string from $Resource for canonicalization
+        $resourcePath = $Resource.Split('?')[0]
+        $canonicalResource = "/$storageAccountName/$resourcePath"
+        $stringToSign = "$date`n$canonicalResource"
+
         $keyBytes = [Convert]::FromBase64String($storageKey)
         $hmac = New-Object System.Security.Cryptography.HMACSHA256
         $hmac.Key = $keyBytes
@@ -146,7 +153,7 @@ try {
         return @{
             'x-ms-date'      = $date
             'x-ms-version'   = '2020-04-08'
-            'Authorization'  = "SharedKey $storageAccountName`:$signature"
+            'Authorization'  = "SharedKeyLite $storageAccountName`:$signature"
             'Accept'         = 'application/json;odata=nometadata'
             'Content-Type'   = $ContentType
         }
@@ -155,7 +162,7 @@ try {
     Write-Step "Creating Storage Table '$tableName'..."
     try {
         $createBody = @{ TableName = $tableName } | ConvertTo-Json -Compress
-        $headers    = Get-TableAuthHeaders -Method 'POST' -Resource 'Tables'
+        $headers    = Get-TableAuthHeaders -Resource 'Tables'
         Invoke-RestMethod -Uri "$tableBaseUrl/Tables" -Method Post -Headers $headers -Body $createBody -ErrorAction Stop | Out-Null
         Write-Ok "Table created: $tableName"
     }
@@ -177,7 +184,7 @@ try {
             RowKey       = $RowKey
             SettingValue = $SettingValue
         } | ConvertTo-Json -Compress
-        $h = Get-TableAuthHeaders -Method 'PUT' -Resource $resource
+        $h = Get-TableAuthHeaders -Resource $resource
         $h['If-Match'] = '*'
         Invoke-RestMethod -Uri "$tableBaseUrl/$resource" -Method Put -Headers $h -Body $entity -ErrorAction Stop | Out-Null
     }
@@ -185,7 +192,7 @@ try {
     function Get-TableEntity {
         param([string]$PartitionKey, [string]$RowKey)
         $resource = "$tableName(PartitionKey='$PartitionKey',RowKey='$RowKey')"
-        $h = Get-TableAuthHeaders -Method 'GET' -Resource $resource
+        $h = Get-TableAuthHeaders -Resource $resource
         try {
             return Invoke-RestMethod -Uri "$tableBaseUrl/$resource" -Method Get -Headers $h -ErrorAction Stop
         }
