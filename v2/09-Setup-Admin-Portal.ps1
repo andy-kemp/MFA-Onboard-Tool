@@ -99,133 +99,159 @@ try {
     Write-Info "Function App:    $functionAppName"
     Write-Info "Storage Account: $storageAccountName"
 
-    # ── 2. Azure CLI login ────────────────────────────────────────
+    # ── 2. Ensure Az PowerShell modules ──────────────────────────
+    foreach ($mod in @('Az.Accounts', 'Az.Resources', 'Az.Storage', 'Az.Websites')) {
+        if (-not (Get-Module -Name $mod -ListAvailable)) {
+            Write-Host "Missing module: $mod. Install with: Install-Module $mod -Force" -ForegroundColor Red
+            exit 1
+        }
+        Import-Module $mod -ErrorAction Stop
+    }
+
+    # ── 3. Azure login (Az PowerShell — faster than az CLI) ──────
     Write-Step "Connecting to Azure..."
 
-    # Check existing session FIRST — avoids the slow interactive login when already authenticated.
-    $account = az account show 2>$null | ConvertFrom-Json
-    $needsLogin = (-not $account) -or ($account.tenantId -ne $tenantId)
-
-    if ($needsLogin) {
+    $ctx = Get-AzContext -ErrorAction SilentlyContinue
+    if (-not $ctx -or $ctx.Tenant.Id -ne $tenantId -or $ctx.Subscription.Id -ne $subscriptionId) {
         Write-Info "Tenant: $tenantId"
         Write-Host "    A browser window will open for sign-in..." -ForegroundColor Cyan
-        Write-Host ""
-        az login --tenant $tenantId
-        if ($LASTEXITCODE -ne 0) { throw "az login failed or was cancelled." }
-        $account = az account show | ConvertFrom-Json
+        Connect-AzAccount -Tenant $tenantId -Subscription $subscriptionId -ErrorAction Stop | Out-Null
+        $ctx = Get-AzContext
     }
     else {
         Write-Info "Reusing existing Azure session"
     }
 
-    az account set --subscription $subscriptionId
-    if ($LASTEXITCODE -ne 0) { throw "Failed to set subscription $subscriptionId. Ensure your account has access." }
+    Write-Ok "Logged in as: $($ctx.Account.Id)"
+    Write-Info "Subscription: $($ctx.Subscription.Name)"
 
-    Write-Ok "Logged in as: $($account.user.name)"
-    Write-Info "Subscription: $($account.name)"
-
-    # ── Fetch storage account key (used for all table operations) ─
-    # --auth-mode login requires the CLI user to have Storage Table Data Contributor.
-    # Using the account key works for any subscription Owner/Contributor.
+    # ── 4. Fetch storage account key ──────────────────────────────
     Write-Step "Fetching storage account key..."
-    $storageKey = az storage account keys list `
-        --account-name $storageAccountName `
-        --resource-group $resourceGroup `
-        --query "[0].value" -o tsv 2>$null
+    $storageKey = (Get-AzStorageAccountKey -ResourceGroupName $resourceGroup -Name $storageAccountName -ErrorAction Stop)[0].Value
     if (-not $storageKey) { throw "Could not retrieve storage account key. Ensure you have Owner or Contributor on the resource group." }
     Write-Ok "Storage key retrieved"
 
-    # ── 3. Create the MFASettings table ──────────────────────────
-    $tableName = "MFASettings"
-    Write-Step "Creating Storage Table '$tableName'..."
+    # ── 5. Create the MFASettings table via REST ─────────────────
+    $tableName    = "MFASettings"
+    $tableBaseUrl = "https://$storageAccountName.table.core.windows.net"
 
-    $tableExists = az storage table exists `
-        --account-name $storageAccountName `
-        --account-key $storageKey `
-        --name $tableName `
-        --query "exists" -o tsv 2>$null
-
-    if ($tableExists -eq "true") {
-        Write-Ok "Table already exists — skipping creation"
+    function Get-TableAuthHeaders {
+        param([string]$Method, [string]$Resource, [string]$ContentType = "application/json")
+        $date = (Get-Date).ToUniversalTime().ToString("R")
+        $stringToSign = "$Method`n`n$ContentType`n$date`n/$storageAccountName/$Resource"
+        $keyBytes = [Convert]::FromBase64String($storageKey)
+        $hmac = New-Object System.Security.Cryptography.HMACSHA256
+        $hmac.Key = $keyBytes
+        $signature = [Convert]::ToBase64String($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($stringToSign)))
+        return @{
+            'x-ms-date'      = $date
+            'x-ms-version'   = '2020-04-08'
+            'Authorization'  = "SharedKey $storageAccountName`:$signature"
+            'Accept'         = 'application/json;odata=nometadata'
+            'Content-Type'   = $ContentType
+        }
     }
-    else {
-        az storage table create `
-            --account-name $storageAccountName `
-            --account-key $storageKey `
-            --name $tableName | Out-Null
+
+    Write-Step "Creating Storage Table '$tableName'..."
+    try {
+        $createBody = @{ TableName = $tableName } | ConvertTo-Json -Compress
+        $headers    = Get-TableAuthHeaders -Method 'POST' -Resource 'Tables'
+        Invoke-RestMethod -Uri "$tableBaseUrl/Tables" -Method Post -Headers $headers -Body $createBody -ErrorAction Stop | Out-Null
         Write-Ok "Table created: $tableName"
     }
+    catch {
+        if ($_.Exception.Response.StatusCode.value__ -eq 409) {
+            Write-Ok "Table already exists — skipping creation"
+        }
+        else {
+            throw "Failed to create table: $_"
+        }
+    }
 
-    # ── 4. Seed settings from INI ─────────────────────────────────
+    # ── 6. Helper: upsert one entity ──────────────────────────────
+    function Set-TableEntity {
+        param([string]$PartitionKey, [string]$RowKey, [string]$SettingValue)
+        $resource = "$tableName(PartitionKey='$PartitionKey',RowKey='$RowKey')"
+        $entity = @{
+            PartitionKey = $PartitionKey
+            RowKey       = $RowKey
+            SettingValue = $SettingValue
+        } | ConvertTo-Json -Compress
+        $h = Get-TableAuthHeaders -Method 'PUT' -Resource $resource
+        $h['If-Match'] = '*'
+        Invoke-RestMethod -Uri "$tableBaseUrl/$resource" -Method Put -Headers $h -Body $entity -ErrorAction Stop | Out-Null
+    }
+
+    function Get-TableEntity {
+        param([string]$PartitionKey, [string]$RowKey)
+        $resource = "$tableName(PartitionKey='$PartitionKey',RowKey='$RowKey')"
+        $h = Get-TableAuthHeaders -Method 'GET' -Resource $resource
+        try {
+            return Invoke-RestMethod -Uri "$tableBaseUrl/$resource" -Method Get -Headers $h -ErrorAction Stop
+        }
+        catch {
+            if ($_.Exception.Response.StatusCode.value__ -eq 404) { return $null }
+            throw
+        }
+    }
+
+    # ── 7. Seed settings from INI ─────────────────────────────────
     Write-Step "Seeding settings from mfa-config.ini..."
     $seeded = 0
     $seedSkipped = 0
 
     foreach ($section in $seedMap.Keys) {
-        $iniSection = $section
         foreach ($key in $seedMap[$section]) {
-            $value = Get-ConfigValue $iniSection $key
-
-            # az storage entity insert with --if-exists replace acts as upsert
-            $result = az storage entity insert `
-                --account-name $storageAccountName `
-                --account-key $storageKey `
-                --table-name $tableName `
-                --entity "PartitionKey=$section" "RowKey=$key" "SettingValue=$value" `
-                --if-exists replace 2>&1
-
-            if ($LASTEXITCODE -eq 0) {
+            $value = Get-ConfigValue $section $key
+            try {
+                Set-TableEntity -PartitionKey $section -RowKey $key -SettingValue $value
                 Write-Info "$section/$key = $(if ($value) { $value } else { '(empty)' })"
                 $seeded++
             }
-            else {
-                Write-Warn "Failed to seed $section/$key`: $result"
+            catch {
+                Write-Warn "Failed to seed $section/$key`: $($_.Exception.Message)"
                 $seedSkipped++
             }
         }
     }
 
-    # Seed the extra Schedule defaults (only if the key doesn't already have a value)
     Write-Step "Seeding schedule defaults..."
     foreach ($key in $scheduleDefaults.Keys) {
         $defaultValue = $scheduleDefaults[$key]
-
-        # Check if row already exists
-        $existing = az storage entity show `
-            --account-name $storageAccountName `
-            --account-key $storageKey `
-            --table-name $tableName `
-            --partition-key "Schedule" `
-            --row-key $key 2>$null | ConvertFrom-Json
-
+        $existing = Get-TableEntity -PartitionKey 'Schedule' -RowKey $key
         if ($existing) {
             Write-Info "Schedule/$key already set to '$($existing.SettingValue)' — skipping"
         }
         else {
-            az storage entity insert `
-                --account-name $storageAccountName `
-                --account-key $storageKey `
-                --table-name $tableName `
-                --entity "PartitionKey=Schedule" "RowKey=$key" "SettingValue=$defaultValue" `
-                --if-exists replace | Out-Null
-            Write-Info "Schedule/$key = $defaultValue (default)"
-            $seeded++
+            try {
+                Set-TableEntity -PartitionKey 'Schedule' -RowKey $key -SettingValue $defaultValue
+                Write-Info "Schedule/$key = $defaultValue (default)"
+                $seeded++
+            }
+            catch {
+                Write-Warn "Failed to seed Schedule/$key`: $($_.Exception.Message)"
+                $seedSkipped++
+            }
         }
     }
 
     Write-Ok "Seeded $seeded setting(s), $seedSkipped skipped"
 
-    # ── 5. Update Function App environment variables ──────────────
+    # ── 8. Update Function App environment variables ─────────────
     Write-Step "Configuring Function App environment variables..."
 
-    $newSettings = @(
-        "STORAGE_ACCOUNT_NAME=$storageAccountName"
-        "SETTINGS_TABLE_NAME=$tableName"
-        "ADMIN_PORTAL_ORIGIN="   # Empty for now — lock this down once admin portal URL is known
-    )
+    $existingApp = Get-AzWebApp -ResourceGroupName $resourceGroup -Name $functionAppName -ErrorAction Stop
+    $appSettings = @{}
+    foreach ($s in $existingApp.SiteConfig.AppSettings) { $appSettings[$s.Name] = $s.Value }
+
+    $appSettings['STORAGE_ACCOUNT_NAME'] = $storageAccountName
+    $appSettings['SETTINGS_TABLE_NAME']  = $tableName
+    if (-not $appSettings.ContainsKey('ADMIN_PORTAL_ORIGIN')) {
+        $appSettings['ADMIN_PORTAL_ORIGIN'] = ''
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($opsGroupId)) {
-        $newSettings += "OPS_GROUP_ID=$opsGroupId"
+        $appSettings['OPS_GROUP_ID'] = $opsGroupId
         Write-Info "OPS_GROUP_ID set to: $opsGroupId"
     }
     else {
@@ -233,21 +259,12 @@ try {
         Write-Warn "Add OpsGroupId to [OpsGroup] section and re-run this script."
     }
 
-    az functionapp config appsettings set `
-        --resource-group $resourceGroup `
-        --name $functionAppName `
-        --settings @newSettings `
-        2>&1 | Out-Null
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to update Function App settings"
-    }
-
+    Set-AzWebApp -ResourceGroupName $resourceGroup -Name $functionAppName -AppSettings $appSettings -ErrorAction Stop | Out-Null
     Write-Ok "Environment variables updated"
     Write-Info "STORAGE_ACCOUNT_NAME = $storageAccountName"
     Write-Info "SETTINGS_TABLE_NAME  = $tableName"
 
-    # ── 6. Grant Managed Identity Storage Table Data Contributor ──
+    # ── 9. Grant Managed Identity Storage Table Data Contributor ──
     Write-Step "Checking Managed Identity storage permissions..."
 
     $principalId = $config["Azure"]["MFAPrincipalId"]
@@ -257,32 +274,22 @@ try {
         Write-Warn "on the storage account, or re-run after populating MFAPrincipalId."
     }
     else {
-        $storageResourceId = az storage account show `
-            --name $storageAccountName `
-            --resource-group $resourceGroup `
-            --query "id" -o tsv
+        $storageResourceId = (Get-AzStorageAccount -ResourceGroupName $resourceGroup -Name $storageAccountName).Id
+        $roleName = "Storage Table Data Contributor"
+        $existing = Get-AzRoleAssignment -ObjectId $principalId -RoleDefinitionName $roleName -Scope $storageResourceId -ErrorAction SilentlyContinue
 
-        $roleAssignmentExists = az role assignment list `
-            --assignee $principalId `
-            --role "Storage Table Data Contributor" `
-            --scope $storageResourceId `
-            --query "[0].id" -o tsv 2>$null
-
-        if ($roleAssignmentExists) {
-            Write-Ok "Storage Table Data Contributor already assigned"
+        if ($existing) {
+            Write-Ok "$roleName already assigned"
         }
         else {
-            Write-Warn "Assigning 'Storage Table Data Contributor' to Managed Identity..."
-            az role assignment create `
-                --assignee $principalId `
-                --role "Storage Table Data Contributor" `
-                --scope $storageResourceId | Out-Null
-
-            if ($LASTEXITCODE -eq 0) {
+            Write-Warn "Assigning '$roleName' to Managed Identity..."
+            try {
+                New-AzRoleAssignment -ObjectId $principalId -RoleDefinitionName $roleName -Scope $storageResourceId -ErrorAction Stop | Out-Null
                 Write-Ok "RBAC role assigned — may take a few minutes to propagate"
             }
-            else {
-                Write-Warn "RBAC assignment failed. Assign 'Storage Table Data Contributor' manually in the Azure Portal."
+            catch {
+                Write-Warn "RBAC assignment failed: $($_.Exception.Message)"
+                Write-Warn "Assign '$roleName' manually in the Azure Portal."
             }
         }
     }
@@ -298,22 +305,19 @@ try {
     Compress-Archive -Path "$functionCodePath\*" -DestinationPath $zipPath -Force
     Write-Info "Package created: $zipPath"
 
-    $deployResult = az functionapp deployment source config-zip `
-        --resource-group $resourceGroup `
-        --name $functionAppName `
-        --src $zipPath `
-        2>&1
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Function App deployment failed: $deployResult"
+    try {
+        Publish-AzWebApp -ResourceGroupName $resourceGroup -Name $functionAppName -ArchivePath $zipPath -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        throw "Function App deployment failed: $($_.Exception.Message)"
     }
 
     Remove-Item $zipPath -Force
     Write-Ok "Functions deployed"
 
-    # ── 8. Restart and verify ─────────────────────────────────────
+    # ── 10. Restart and verify ────────────────────────────────────
     Write-Step "Restarting Function App..."
-    az functionapp restart --resource-group $resourceGroup --name $functionAppName 2>&1 | Out-Null
+    Restart-AzWebApp -ResourceGroupName $resourceGroup -Name $functionAppName -ErrorAction Stop | Out-Null
     Write-Ok "Function App restarted"
 
     Write-Host "`nWaiting 30 seconds for deployment to propagate..." -ForegroundColor Yellow
