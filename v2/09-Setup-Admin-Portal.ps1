@@ -112,10 +112,14 @@ try {
     $needsLogin = (-not $account) -or ($account.tenantId -ne $tenantId)
 
     if ($needsLogin) {
-        Write-Warn "Login required — a browser window will open for you to sign in."
-        az login --tenant $tenantId --allow-no-subscriptions 2>$null | Out-Null
-        $account = az account show 2>$null | ConvertFrom-Json
-        if (-not $account) { throw "az login failed or was cancelled." }
+        Write-Warn "Login required for tenant $tenantId"
+        Write-Warn "A browser window should open. If it does not, copy the URL/code printed below."
+        Write-Host ""
+        # Do NOT redirect output — az login needs to print the URL/device code to the console
+        az login --tenant $tenantId --allow-no-subscriptions
+        if ($LASTEXITCODE -ne 0) { throw "az login failed or was cancelled." }
+        $account = az account show | ConvertFrom-Json
+        if (-not $account) { throw "az login completed but no account context is available." }
     }
 
     az account set --subscription $subscriptionId 2>&1 | Out-Null
