@@ -184,8 +184,9 @@ try {
             RowKey       = $RowKey
             SettingValue = $SettingValue
         } | ConvertTo-Json -Compress
+        # PUT without If-Match = "Insert Or Replace Entity" (upsert).
+        # If-Match: * would make this "Update Entity" which 404s when the row does not yet exist.
         $h = Get-TableAuthHeaders -Resource $resource
-        $h['If-Match'] = '*'
         Invoke-RestMethod -Uri "$tableBaseUrl/$resource" -Method Put -Headers $h -Body $entity -ErrorAction Stop | Out-Null
     }
 
