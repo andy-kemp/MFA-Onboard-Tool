@@ -28,10 +28,14 @@ Write-Host "========================================`n" -ForegroundColor Cyan
 
 # ── 1. Find the existing install ──────────────────────────────────
 function Find-ExistingInstall {
-    # Common locations to probe
+    # Common locations to probe — $PWD first so running from the install folder works
+    # even when invoked via irm | iex (where $PSScriptRoot is empty)
     $candidates = @(
         $ExistingInstallPath,
+        "$PWD\v2",
+        $PWD,
         "$PSScriptRoot\v2",
+        "$PSScriptRoot",
         "C:\Scripts\MFA-Onboard-Tool-main\v2",
         "C:\Scripts\MFA-Onboard-Tool\v2",
         "$HOME\Documents\MFA-Onboard-Tool-main\v2",
