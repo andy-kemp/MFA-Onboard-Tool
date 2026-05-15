@@ -100,30 +100,22 @@ try {
     Write-Info "Storage Account: $storageAccountName"
 
     # ── 2. Azure CLI login ────────────────────────────────────────
-    Write-Step "Checking Azure CLI login..."
+    Write-Step "Connecting to Azure..."
+    Write-Info "Tenant: $tenantId"
+    Write-Host ""
 
-    # Use a job with a timeout so a stale auth cache can't hang the script
-    $accountJob = Start-Job { az account show 2>$null }
-    $accountJob | Wait-Job -Timeout 15 | Out-Null
-    $accountRaw = if ($accountJob.State -eq 'Completed') { Receive-Job $accountJob } else { $null }
-    Remove-Job $accountJob -Force
+    # Always run az login — it will use cached creds if valid, otherwise open a browser.
+    # No output redirection so any device-code/URL prompts are visible to the user.
+    az login --tenant $tenantId | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "az login failed or was cancelled." }
 
-    $account    = $accountRaw | ConvertFrom-Json -ErrorAction SilentlyContinue
-    $needsLogin = (-not $account) -or ($account.tenantId -ne $tenantId)
+    az account set --subscription $subscriptionId
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set subscription $subscriptionId. Ensure your account has access." }
 
-    if ($needsLogin) {
-        Write-Warn "Login required for tenant $tenantId"
-        Write-Warn "A browser window should open. If it does not, copy the URL/code printed below."
-        Write-Host ""
-        # Do NOT redirect output — az login needs to print the URL/device code to the console
-        az login --tenant $tenantId --allow-no-subscriptions
-        if ($LASTEXITCODE -ne 0) { throw "az login failed or was cancelled." }
-        $account = az account show | ConvertFrom-Json
-        if (-not $account) { throw "az login completed but no account context is available." }
-    }
-
-    az account set --subscription $subscriptionId 2>&1 | Out-Null
+    $account = az account show | ConvertFrom-Json
+    if (-not $account) { throw "Could not retrieve Azure account context after login." }
     Write-Ok "Logged in as: $($account.user.name)"
+    Write-Info "Subscription: $($account.name)"
 
     # ── Fetch storage account key (used for all table operations) ─
     # --auth-mode login requires the CLI user to have Storage Table Data Contributor.
