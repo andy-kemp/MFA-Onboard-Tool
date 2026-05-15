@@ -114,7 +114,7 @@ try {
     if ($needsLogin) {
         Write-Warn "Login required for tenant $tenantId"
         Write-Host "       (Using device code — check the URL and code printed below)" -ForegroundColor Gray
-        az logout 2>&1 | Out-Null
+        az logout 2>$null
         az login --tenant $tenantId --use-device-code
         $account = az account show 2>$null | ConvertFrom-Json
         if (-not $account) { throw "az login failed or was cancelled." }
@@ -123,14 +123,25 @@ try {
     az account set --subscription $subscriptionId 2>&1 | Out-Null
     Write-Ok "Logged in as: $($account.user.name)"
 
+    # ── Fetch storage account key (used for all table operations) ─
+    # --auth-mode login requires the CLI user to have Storage Table Data Contributor.
+    # Using the account key works for any subscription Owner/Contributor.
+    Write-Step "Fetching storage account key..."
+    $storageKey = az storage account keys list `
+        --account-name $storageAccountName `
+        --resource-group $resourceGroup `
+        --query "[0].value" -o tsv 2>$null
+    if (-not $storageKey) { throw "Could not retrieve storage account key. Ensure you have Owner or Contributor on the resource group." }
+    Write-Ok "Storage key retrieved"
+
     # ── 3. Create the MFASettings table ──────────────────────────
     $tableName = "MFASettings"
     Write-Step "Creating Storage Table '$tableName'..."
 
     $tableExists = az storage table exists `
         --account-name $storageAccountName `
+        --account-key $storageKey `
         --name $tableName `
-        --auth-mode login `
         --query "exists" -o tsv 2>$null
 
     if ($tableExists -eq "true") {
@@ -139,8 +150,8 @@ try {
     else {
         az storage table create `
             --account-name $storageAccountName `
-            --name $tableName `
-            --auth-mode login | Out-Null
+            --account-key $storageKey `
+            --name $tableName | Out-Null
         Write-Ok "Table created: $tableName"
     }
 
@@ -157,10 +168,10 @@ try {
             # az storage entity insert with --if-exists replace acts as upsert
             $result = az storage entity insert `
                 --account-name $storageAccountName `
+                --account-key $storageKey `
                 --table-name $tableName `
                 --entity "PartitionKey=$section" "RowKey=$key" "SettingValue=$value" `
-                --if-exists replace `
-                --auth-mode login 2>&1
+                --if-exists replace 2>&1
 
             if ($LASTEXITCODE -eq 0) {
                 Write-Info "$section/$key = $(if ($value) { $value } else { '(empty)' })"
@@ -181,10 +192,10 @@ try {
         # Check if row already exists
         $existing = az storage entity show `
             --account-name $storageAccountName `
+            --account-key $storageKey `
             --table-name $tableName `
             --partition-key "Schedule" `
-            --row-key $key `
-            --auth-mode login 2>$null | ConvertFrom-Json
+            --row-key $key 2>$null | ConvertFrom-Json
 
         if ($existing) {
             Write-Info "Schedule/$key already set to '$($existing.SettingValue)' — skipping"
@@ -192,10 +203,10 @@ try {
         else {
             az storage entity insert `
                 --account-name $storageAccountName `
+                --account-key $storageKey `
                 --table-name $tableName `
                 --entity "PartitionKey=Schedule" "RowKey=$key" "SettingValue=$defaultValue" `
-                --if-exists replace `
-                --auth-mode login | Out-Null
+                --if-exists replace | Out-Null
             Write-Info "Schedule/$key = $defaultValue (default)"
             $seeded++
         }
