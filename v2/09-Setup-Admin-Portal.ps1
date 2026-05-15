@@ -101,19 +101,26 @@ try {
 
     # ── 2. Azure CLI login ────────────────────────────────────────
     Write-Step "Connecting to Azure..."
-    Write-Info "Tenant: $tenantId"
-    Write-Host ""
 
-    # Always run az login — it will use cached creds if valid, otherwise open a browser.
-    # No output redirection so any device-code/URL prompts are visible to the user.
-    az login --tenant $tenantId | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "az login failed or was cancelled." }
+    # Check existing session FIRST — avoids the slow interactive login when already authenticated.
+    $account = az account show 2>$null | ConvertFrom-Json
+    $needsLogin = (-not $account) -or ($account.tenantId -ne $tenantId)
+
+    if ($needsLogin) {
+        Write-Info "Tenant: $tenantId"
+        Write-Host "    A browser window will open for sign-in..." -ForegroundColor Cyan
+        Write-Host ""
+        az login --tenant $tenantId
+        if ($LASTEXITCODE -ne 0) { throw "az login failed or was cancelled." }
+        $account = az account show | ConvertFrom-Json
+    }
+    else {
+        Write-Info "Reusing existing Azure session"
+    }
 
     az account set --subscription $subscriptionId
     if ($LASTEXITCODE -ne 0) { throw "Failed to set subscription $subscriptionId. Ensure your account has access." }
 
-    $account = az account show | ConvertFrom-Json
-    if (-not $account) { throw "Could not retrieve Azure account context after login." }
     Write-Ok "Logged in as: $($account.user.name)"
     Write-Info "Subscription: $($account.name)"
 
