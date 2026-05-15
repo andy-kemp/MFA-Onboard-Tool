@@ -101,14 +101,23 @@ try {
 
     # ── 2. Azure CLI login ────────────────────────────────────────
     Write-Step "Checking Azure CLI login..."
-    $account = az account show 2>$null | ConvertFrom-Json
+
+    # Use a job with a timeout so a stale auth cache can't hang the script
+    $accountJob = Start-Job { az account show 2>$null }
+    $accountJob | Wait-Job -Timeout 15 | Out-Null
+    $accountRaw = if ($accountJob.State -eq 'Completed') { Receive-Job $accountJob } else { $null }
+    Remove-Job $accountJob -Force
+
+    $account    = $accountRaw | ConvertFrom-Json -ErrorAction SilentlyContinue
     $needsLogin = (-not $account) -or ($account.tenantId -ne $tenantId)
 
     if ($needsLogin) {
-        Write-Warn "Logging in to tenant $tenantId..."
+        Write-Warn "Login required for tenant $tenantId"
+        Write-Host "       (Using device code — check the URL and code printed below)" -ForegroundColor Gray
         az logout 2>&1 | Out-Null
-        az login --tenant $tenantId
-        $account = az account show | ConvertFrom-Json
+        az login --tenant $tenantId --use-device-code
+        $account = az account show 2>$null | ConvertFrom-Json
+        if (-not $account) { throw "az login failed or was cancelled." }
     }
 
     az account set --subscription $subscriptionId 2>&1 | Out-Null
