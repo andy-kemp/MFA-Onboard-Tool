@@ -114,7 +114,6 @@ try {
     if ($needsLogin) {
         Write-Warn "Login required for tenant $tenantId"
         Write-Host "       (Using device code — check the URL and code printed below)" -ForegroundColor Gray
-        az logout 2>$null
         az login --tenant $tenantId --use-device-code
         $account = az account show 2>$null | ConvertFrom-Json
         if (-not $account) { throw "az login failed or was cancelled." }
