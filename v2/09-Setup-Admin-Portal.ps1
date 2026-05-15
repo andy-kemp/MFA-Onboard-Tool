@@ -23,6 +23,13 @@ function Get-IniContent {
     return $ini
 }
 
+function Get-ConfigValue {
+    param([string]$Section, [string]$Key)
+    if (-not $config.ContainsKey($Section)) { return "" }
+    if (-not $config[$Section].ContainsKey($Key)) { return "" }
+    return $config[$Section][$Key]
+}
+
 function Write-Step {
     param([string]$Text)
     Write-Host "`n$Text" -ForegroundColor Yellow
@@ -69,12 +76,15 @@ try {
     }
     $config = Get-IniContent -Path $configFile
 
-    $tenantId          = $config["Tenant"]["TenantId"]
-    $subscriptionId    = $config["Tenant"]["SubscriptionId"]
-    $resourceGroup     = $config["Azure"]["ResourceGroup"]
-    $functionAppName   = $config["Azure"]["FunctionAppName"]
-    $storageAccountName = $config["Azure"]["StorageAccountName"]
-    $opsGroupId        = $config["OpsGroup"]["OpsGroupId"]
+    # Dump detected sections to help diagnose missing-section issues
+    Write-Host "  Detected INI sections: $($config.Keys -join ', ')" -ForegroundColor Gray
+
+    $tenantId           = Get-ConfigValue "Tenant"   "TenantId"
+    $subscriptionId     = Get-ConfigValue "Tenant"   "SubscriptionId"
+    $resourceGroup      = Get-ConfigValue "Azure"    "ResourceGroup"
+    $functionAppName    = Get-ConfigValue "Azure"    "FunctionAppName"
+    $storageAccountName = Get-ConfigValue "Azure"    "StorageAccountName"
+    $opsGroupId         = Get-ConfigValue "OpsGroup" "OpsGroupId"
 
     foreach ($required in @($tenantId, $subscriptionId, $resourceGroup, $functionAppName, $storageAccountName)) {
         if ([string]::IsNullOrWhiteSpace($required)) {
@@ -131,12 +141,9 @@ try {
     $seedSkipped = 0
 
     foreach ($section in $seedMap.Keys) {
-        $iniSection = $section  # INI section names match the seed map keys
+        $iniSection = $section
         foreach ($key in $seedMap[$section]) {
-            $value = ""
-            if ($config.ContainsKey($iniSection) -and $config[$iniSection].ContainsKey($key)) {
-                $value = $config[$iniSection][$key]
-            }
+            $value = Get-ConfigValue $iniSection $key
 
             # az storage entity insert with --if-exists replace acts as upsert
             $result = az storage entity insert `
