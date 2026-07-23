@@ -1,0 +1,10 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "powershell",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "TAP_CONFIG_JSON": "{\"TenantId\":\"\",\"DefaultTenantDomain\":\"contoso.com\",\"DefaultGroupObjectId\":\"\",\"AdminGroupObjectId\":\"\",\"SharedMailboxAddress\":\"no-reply@contoso.com\",\"SharePointSiteId\":\"\",\"SharePointListId\":\"\",\"TapLifetimeDays\":7,\"TapIsUsableOnce\":true,\"MaximumTapAttempts\":2,\"MaximumOnboardingDays\":21,\"RequireApprovalAfterAttempt\":2,\"DisableAutomaticReissue\":false,\"ApprovedPasskeyMethodTypes\":[\"MicrosoftAuthenticatorPasskey\"],\"CompanyDisplayName\":\"Contoso\",\"SupportEmailAddress\":\"support@contoso.com\",\"ApplicationLinks\":{\"AuthenticatorDownloadUrlIOS\":\"\",\"AuthenticatorDownloadUrlAndroid\":\"\",\"MySecurityInfoUrl\":\"https://mysignins.microsoft.com/security-info\",\"Microsoft365PortalUrl\":\"https://www.microsoft365.com\",\"TeamsUrl\":\"https://teams.microsoft.com\",\"OutlookUrl\":\"https://outlook.office.com\",\"SharePointUrl\":\"\",\"PasskeySetupGuideUrl\":\"\"},\"EmailTemplatePath\":\"function-code/templates/onboarding-email.html\"}",
+    "STORAGE_QUEUE_NAME": "tap-user-processing",
+    "ADMIN_PORTAL_ORIGIN": "http://localhost:4280"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "storageAccountName": {
+      "value": "REPLACE_STORAGE_ACCOUNT_NAME"
+    },
+    "functionAppName": {
+      "value": "REPLACE_FUNCTION_APP_NAME"
+    },
+    "staticWebAppName": {
+      "value": "REPLACE_STATIC_WEB_APP_NAME"
+    },
+    "queueName": {
+      "value": "tap-user-processing"
+    }
+  }
+}
