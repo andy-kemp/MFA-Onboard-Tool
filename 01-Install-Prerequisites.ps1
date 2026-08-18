@@ -89,6 +89,7 @@ try {
             throw "Azure CLI not found"
         }
     }
+    #
     catch {
         Write-Host "✗ Azure CLI is not installed or not in PATH" -ForegroundColor Red
         Write-Host "`nTo install Azure CLI, run this command in an elevated PowerShell window:" -ForegroundColor Cyan
